@@ -159,25 +159,7 @@ impl LlamaContext<'_> {
         path_session: impl AsRef<Path>,
         tokens: &[LlamaToken],
     ) -> Result<(), SaveSessionError> {
-        let path = path_session.as_ref();
-        let path = path
-            .to_str()
-            .ok_or_else(|| SaveSessionError::PathToStrError(path.to_path_buf()))?;
-
-        let cstr = CString::new(path)?;
-
-        if unsafe {
-            llama_cpp_sys_2::llama_save_session_file(
-                self.synchronizable_ptr(),
-                cstr.as_ptr(),
-                tokens.as_ptr().cast::<llama_cpp_sys_2::llama_token>(),
-                tokens.len(),
-            )
-        } {
-            Ok(())
-        } else {
-            Err(SaveSessionError::FailedToSave)
-        }
+        self.state_save_file(path_session, tokens)
     }
     /// Load a session file into the current context.
     ///
@@ -197,39 +179,7 @@ impl LlamaContext<'_> {
         path_session: impl AsRef<Path>,
         max_tokens: usize,
     ) -> Result<Vec<LlamaToken>, LoadSessionError> {
-        let path = path_session.as_ref();
-        let path = path
-            .to_str()
-            .ok_or(LoadSessionError::PathToStrError(path.to_path_buf()))?;
-
-        let cstr = CString::new(path)?;
-        let mut tokens: Vec<LlamaToken> = Vec::with_capacity(max_tokens);
-        let mut n_out = 0;
-
-        // SAFETY: cast is valid as LlamaToken is repr(transparent)
-        let tokens_out = tokens.as_mut_ptr().cast::<llama_cpp_sys_2::llama_token>();
-
-        let load_session_success = unsafe {
-            llama_cpp_sys_2::llama_load_session_file(
-                self.context.as_mut_ptr(),
-                cstr.as_ptr(),
-                tokens_out,
-                max_tokens,
-                &mut n_out,
-            )
-        };
-        if load_session_success {
-            if n_out > max_tokens {
-                return Err(LoadSessionError::InsufficientMaxLength { n_out, max_tokens });
-            }
-            // SAFETY: we checked that n_out <= max_tokens and llama.cpp promises that n_out tokens will be written
-            unsafe {
-                tokens.set_len(n_out);
-            }
-            Ok(tokens)
-        } else {
-            Err(LoadSessionError::FailedToLoad)
-        }
+        self.state_load_file(path_session, max_tokens)
     }
 
     /// Save the full state to a file.
@@ -447,7 +397,7 @@ impl LlamaContext<'_> {
     /// and `kv_cache`) - will often be smaller after compacting tokens
     #[must_use]
     pub fn get_state_size(&self) -> usize {
-        unsafe { llama_cpp_sys_2::llama_get_state_size(self.synchronizable_ptr()) }
+        unsafe { llama_cpp_sys_2::llama_state_get_size(self.synchronizable_ptr()) }
     }
 
     /// Copies the state to the specified destination address.
@@ -456,9 +406,10 @@ impl LlamaContext<'_> {
     ///
     /// # Safety
     ///
-    /// Destination needs to have allocated enough memory.
+    /// Destination needs to have allocated at least [`get_state_size`](Self::get_state_size) bytes.
     pub unsafe fn copy_state_data(&self, dest: *mut u8) -> usize {
-        unsafe { llama_cpp_sys_2::llama_copy_state_data(self.synchronizable_ptr(), dest) }
+        let size = self.get_state_size();
+        unsafe { llama_cpp_sys_2::llama_state_get_data(self.synchronizable_ptr(), dest, size) }
     }
 
     /// Set the state reading from the specified address
@@ -468,7 +419,9 @@ impl LlamaContext<'_> {
     ///
     /// help wanted: not entirely sure what the safety requirements are here.
     pub unsafe fn set_state_data(&mut self, src: &[u8]) -> usize {
-        unsafe { llama_cpp_sys_2::llama_set_state_data(self.context.as_mut_ptr(), src.as_ptr()) }
+        unsafe {
+            llama_cpp_sys_2::llama_state_set_data(self.context.as_mut_ptr(), src.as_ptr(), src.len())
+        }
     }
 
     /// Get the size of the state for a single sequence with optional flags.
